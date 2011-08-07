@@ -1,0 +1,87 @@
+#!/usr/bin/env php
+<?php
+
+$opts = getopt("u:b:");
+
+if(!isset($opts['b'])) {
+	echo "Usage: show-changes -u <zendesk-user> -b <from-branch>
+
+-u If you specify the zendesk user, the script will try to fetch the ticket subjects.
+-b Branch/tag to compare with.
+
+For example: if you check out master and run 'show-changes -b v1.0.0', you will see
+a list of changes since this version.
+";
+	exit(1);
+}
+
+$from = $opts['b'];
+$rawData =`git log $from..HEAD --pretty="[%an] %s" | grep -v "Merge branch" | sort`;
+if(!$rawData) exit();
+
+// Find helpdesk tickets
+$lines = explode("\n", $rawData);
+$hds = array();
+foreach($lines as $line) {
+	if(!$line) continue;
+	findHDs($line, $hds);
+}
+$hds = array_unique($hds);
+sort($hds);
+
+if (isset($opts['u'])) {
+	echo "Zendesk password: ";
+	system('stty -echo');
+	$password = trim(fgets(STDIN));
+	system('stty echo');
+	echo "\n";
+}
+
+echo "\nSummary of changes at " . date("d/m/y H:i") . " after $from:\n\n";
+if($hds) {
+	echo "Helpdesk tickets worked on:\n\n";
+	foreach($hds as $hd) {
+		if (isset($password)) {
+			$ticket = exec("curl -L -u {$opts['u']}:$password http://helpdesk.silverstripe.com/tickets/$hd.json 2> /dev/null", $output, $status);
+			$ticket = json_decode($ticket);	
+			if ($status==0 && $ticket) {
+				echo " * #$hd - {$ticket->subject} - http://helpdesk.silverstripe.com/tickets/$hd\n";
+			}
+			else {
+				echo "Invalid password, or the server cannot be contacted. Try removing the -u option.\n";
+				exit;
+			}
+		}
+		else {
+			echo " * #$hd - http://helpdesk.silverstripe.com/tickets/$hd\n";
+		}
+	}
+}
+
+$curName = null;
+foreach($lines as $line) {
+	// Add linebreaks between people
+	if(preg_match('/\[(.+)\]/', $line, $matches)) {
+		if($curName != $matches[1]) echo "\nChanges by $matches[1]:\n\n";
+		$curName = $matches[1];
+	}
+	if(!$line) continue;
+	$line = str_replace("[$curName] ","",$line);
+	$line = preg_replace('/(MAINT|ENHANCEMENT|MINOR|BUGFIX|APICHANGE[: ])/',"\n * \$1", $line);
+	$line = trim($line, "\n");
+	echo "$line\n";
+}
+
+echo "\n";
+
+echo "All files changed:\n\n";
+echo `git diff HEAD $from --name-only`;
+echo "\n";
+
+function findHDs($line, &$hds) {
+	if(preg_match_all('/HD *#?([0-9]+)/i', $line, $matches)) {
+		foreach($matches[1] as $match) {
+			$hds[] = $match;
+		}
+	}
+}
